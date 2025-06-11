@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Coastal Erosion Map</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css" />
+  <link rel="stylesheet" href="Required_plugins/leaflet.groupedlayercontrol.min.css"/>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+  <script src="Required_plugins/leaflet.groupedlayercontrol.min.js"></script>
+  <style>
+    #map { height: 100vh; width: 100%; }
+    .leaflet-control-zoom { bottom: 10px !important; top: auto !important; left: 10px !important; right: auto !important; }
+    .search-bar { position: absolute; top: 10px; left: 10px; z-index: 1000; background: white; padding: 5px; box-shadow: 0 0 5px rgba(0,0,0,0.3); }
+    .legend { line-height: 1.5em; background: white; padding: 10px; border-radius: 4px; box-shadow: 0 0 15px rgba(0,0,0,0.2); font-size: 14px; width: max-content; }
+    .legend i { width: 18px; height: 18px; float: left; margin-right: 8px; opacity: 0.9; }
+    .legend div { clear: both; margin-bottom: 4px; }
+    .sea-level-slider { position: absolute; top: 60px; left: 10px; z-index: 1000; background: white; padding: 10px; box-shadow: 0 0 5px rgba(0,0,0,0.3); border-radius: 4px; display: none; }
+    .slider { width: 200px; margin: 5px 0; }
+    .slider-value { font-weight: bold; color: #FF0000; }
+  </style>
+</head>
+<body>
+<div class="search-bar">
+  <input type="text" id="locationInput" placeholder="Search location...">
+  <button onclick="searchLocation()">Go</button>
+</div>
+<div class="sea-level-slider" id="seaLevelSlider">
+  <div>Sea Level Rise: <span class="slider-value" id="sliderValue">0cm</span></div>
+  <input type="range" class="slider" id="seaLevelRange" min="0" max="200" step="10" value="0" oninput="updateSeaLevel(this.value)">
+  <div style="font-size: 14px; color: #FF0000;">0cm ←→ 200cm</div>
+<div id="sliderText" style="margin-top: 8px; font-size: 14px; color: #008000; max-width: 200px; line-height: 1.3;">
+    Sea level rise may dramatically alter New Zealand’s coasts.
+              It also contributes to coastal erosion.<br>             
+              Move the slider to see how different amounts 
+              of sea level rise could affect New Zealand. </div>
+</div>
+<div id="map"></div>
+<script>
+var map = L.map('map', { zoomControl: false }).setView([-41.2, 174.8], 5);
+L.control.zoom({ position: 'bottomleft' }).addTo(map);
+var baseLayers = {
+  "OpenStreetMap": L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '&copy; OpenStreetMap contributors'
+  }).addTo(map),
+  "Satellite": L.tileLayer('https://{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', {
+    maxZoom: 19,
+    subdomains:['mt0','mt1','mt2','mt3'],
+    attribution: '&copy; Google Satellite'
+  }),
+  "Terrain": L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
+    maxZoom: 17,
+    attribution: 'Map data: &copy; OpenTopoMap contributors'
+  })
+};
+
+var overlays = {};
+
+function createWMSLayer(layerName, displayName) {
+  var wms = L.tileLayer.wms("http://localhost:8080/geoserver/G3_Coastal_Erosion/wms", {
+    layers: "G3_Coastal_Erosion:" + layerName,
+    format: "image/png",
+    transparent: true,
+    tiled: true
+  });
+  overlays[displayName] = wms;
+  return wms;
+}
+
+createWMSLayer("Coastal Change Annual Rate", "Coastal Change Rate").addTo(map);
+createWMSLayer("Net Shoreline Movement", "Net Shoreline Movement");
+createWMSLayer("csi_e_pg", "Coastal Sensitivity: Erosion");
+createWMSLayer("csi_i_pg", "Coastal Sensitivity: Inundation");
+createWMSLayer("Coastal Vegetation", "Vegetation");
+createWMSLayer("Erosion Severity", "Land Erosion Severity");
+createWMSLayer("Erosion Type", "Land Erosion Type");
+createWMSLayer("Coastal Soil", "Coastal Soil");
+createWMSLayer("Coastal Soil Drainage Class", "Coastal Soil Drainage Class");
+createWMSLayer("Coastal Hydrosystems", "Coastal Hydrosystems");
+createWMSLayer("Coastal and estaurine suspended solids median", "Coastal & Estuarine Suspended Solids (2016-2020)");
+
+// Sea Level Rise with dynamic layer capability
+var seaLevelLayers = {};
+var currentSeaLevel = 0;
+
+function createSeaLevelLayer(level) {
+  return L.tileLayer.wms("http://localhost:8080/geoserver/G3_Coastal_Erosion/wms", {
+    layers: "G3_Coastal_Erosion:Sea Level Rise",
+    format: "image/png",
+    transparent: true,
+    tiled: true,
+    CQL_FILTER: "layer LIKE 'Sea Level Rise " + level + "cm'"
+  });
+}
+
+// Create the main Sea Level Rise layer (starts at 0cm)
+var seaLevelRiseLayer = createSeaLevelLayer(0);
+overlays["Sea Level Rise"] = seaLevelRiseLayer;
+
+
+// Cyclone Gabrielle Data
+var cyclone_WMS = L.tileLayer.wms('http://localhost:8080/geoserver/ows?', {
+  layers: 'Cyclone gabrielle erosion news article nztm',
+  format: 'image/png',
+  transparent: true
+});
+
+var twisterIcon = L.icon({
+  iconUrl: './Cyclone_images/twister.png',
+  iconSize: [40, 40],
+  iconAnchor: [20, 40],
+  popupAnchor: [0, -40]
+});
+
+var mahanga = L.marker([-39.0177407, 177.8850735], {icon: twisterIcon})
+  .bindPopup("<h3>Mahanga Beach, Hawke's Bay</h3>Erosion due to Cyclone Gabrielle: 20 metres");
+var whangamata = L.marker([-37.2063323, 175.8719724], {icon: twisterIcon})
+  .bindPopup('<h3>Whangamata Beach, Coromandel</h3><p>Erosion due to Cyclone Gabrielle: 15 metres</p><img src="./Cyclone_images/Whangamata_image.png" style="width:200px"><p><a href="https://www.nzherald.co.nz/waikato-news/news/cyclone-gabrielle-erosion-whangamata-beach-lost-15-metres-study-shows/DXX7XQCJBZHDRDFZAVFUBDDSSU/">Image source</a></p>');
+var matarangi = L.marker([-36.7270336, 175.6537874], {icon: twisterIcon})
+  .bindPopup('<h3>Matarangi Beach, Coromandel</h3><p>Erosion due to Cyclone Gabrielle: 10 metres</p><img src="./Cyclone_images/Matarangi_image.png" style="width:200px"><p><a href="https://www.nzherald.co.nz/waikato-news/news/cyclone-gabrielle-erosion-whangamata-beach-lost-15-metres-study-shows/DXX7XQCJBZHDRDFZAVFUBDDSSU/">Image source</a></p>');
+var omaha = L.marker([-36.334762, 174.7795482], {icon: twisterIcon})
+  .bindPopup("<h3>Omaha Beach, Auckland</h3>Erosion due to Cyclone Gabrielle: 10 metres");
+var ruakaka = L.marker([-35.9086813, 174.4556042], {icon: twisterIcon})
+  .bindPopup("<h3>Ruakaka Beach, Northland</h3>Erosion due to Cyclone Gabrielle: 10 metres");
+
+var cyclone_group = L.layerGroup([cyclone_WMS, mahanga, whangamata, matarangi, omaha, ruakaka],{
+attribution: '<a href="https://www.flaticon.com/free-icons/cyclone" title="cyclone icons">Cyclone icons created by Freepik - Flaticon</a>'});
+overlays["Cyclone Gabrielle"] = cyclone_group;
+
+// Put Layers in Groups with Headings for Display Purposes
+var groupedOverlays = {
+   "Coastal Erosion and Damage": {
+       "Coastal Change Rate": overlays["Coastal Change Rate"],
+       "Net Shoreline Movement": overlays["Net Shoreline Movement"],
+       "Coastal Sensitivity: Erosion": overlays["Coastal Sensitivity: Erosion"],
+       "Coastal Sensitivity: Inundation": overlays["Coastal Sensitivity: Inundation"],
+       "Sea Level Rise": overlays["Sea Level Rise"]
+},
+   "Possible Contributing Factors": {
+       "Vegetation": overlays["Vegetation"],
+       "Land Erosion Severity": overlays["Land Erosion Severity"],
+       "Land Erosion Type": overlays["Land Erosion Type"],
+       "Coastal Soil": overlays["Coastal Soil"],
+       "Coastal Soil Drainage Class": overlays["Coastal Soil Drainage Class"],
+       "Coastal Hydrosystems": overlays["Coastal Hydrosystems"],
+       "Coastal & Estuarine Suspended Solids (2016-2020)": overlays["Coastal & Estuarine Suspended Solids (2016-2020)"],
+       "Cyclone Gabrielle": overlays["Cyclone Gabrielle"]
+}
+};
+
+L.control.groupedLayers(baseLayers, groupedOverlays).addTo(map);
+
+var legendControl = L.control({position: 'bottomright'});
+legendControl.onAdd = function (map) {
+  var div = L.DomUtil.create('div', 'legend');
+  div.innerHTML = getLegendHTML("Coastal Change Rate");
+  return div;
+};
+legendControl.addTo(map);
+
+function getLegendHTML(layerName) {
+  const legends = {
+
+
+    "Coastal Change Rate": `
+      <strong>Coastal Change Rate (m/year)</strong><br>
+      <div><i style="background: #ca0020"></i> &lt; -1.5</div>
+      <div><i style="background: #df5351"></i> -1.5 to -1</div>
+      <div><i style="background: #f4a582"></i> -1 to -0.5</div>
+      <div><i style="background: #f6cebd"></i> -0.5 to -0.1</div>
+      <div><i style="background: #f7f7f7"></i> -0.1 to 0.1</div>
+      <div><i style="background: #c4deeb"></i> 0.1 to 0.5</div>
+      <div><i style="background: #92c5de"></i> 0.5 to 1</div>
+      <div><i style="background: #4c9bc7"></i> 1 to 1.5</div>
+      <div><i style="background: #0571b0"></i> &gt; 1.5</div>
+      
+      <div style= "color: blue;"
+      This shows the average rate of change of the coastline <br>
+      over the last 80 years or so. A negative number means <br>
+      the coastline moved inland (Erosion) A positive number means<br>
+      the coastline moved further out to sea (Deposition).<div>
+    `,
+    "Net Shoreline Movement": `
+      <strong>Net Shoreline Movement (m)</strong><br>
+      <div><i style="background: #ca0020"></i> &lt; -45</div>
+      <div><i style="background: #e66e61"></i> -45 to -16</div>
+      <div><i style="background: #f5c0a9"></i> -16 to -3</div>
+      <div><i style="background: #f7f7f7"></i> -3 to 3</div>
+      <div><i style="background: #b4d6e6"></i> 3 to 16</div>
+      <div><i style="background: #63a9cf"></i> 16 to 45</div>
+      <div><i style="background: #0571b0"></i> &gt; 45</div>
+      <div style= "color: blue;"
+      This shows the average rate of change of the coastline <br>
+      over the last 80 years or so. A negative number means <br>
+      the coastline moved inland (Erosion) A positive number means<br>
+      the coastline moved further out to sea (Deposition).<div>
+    `,
+    "Vegetation": `
+      <strong>Vegetation Type</strong><br>
+      <div><i style="background: #00441b"></i> Native</div>
+      <div><i style="background: #238b45"></i> Scrub</div>
+      <div><i style="background: #ffffcc"></i> Pasture</div>
+      <div><i style="background: #cccccc"></i> Unknown</div>
+     <div style= "color: green;"
+      Vegetation plays a role in stabilising land. For example,<br>
+      native vegetation (like coastal forest or flax) <br>
+      generally offers strong root networks.<div>
+    `,
+    "Land Erosion Severity": `
+      <strong>Land Erosion Severity</strong><br>
+      <div><i style="background: #006400"></i> Very Slight</div>
+      <div><i style="background: #adff2f"></i> Slight</div>
+      <div><i style="background: #ffff00"></i> Moderate</div>
+      <div><i style="background: #ffa500"></i> Severe</div>
+      <div><i style="background: #ff0000"></i> Very Severe</div>
+      <div><i style="background: #a9a9a9"></i> Unknown</div>
+     <div style= "color: brown;"
+      Sediment movement is linked to coastal erosion. <br> 
+      We speculate that land erosion near the coast  <br>
+      may affect sediment supply to the coast.<div>
+
+    `,
+    "Land Erosion Type": `
+      <strong>Land Erosion Type</strong><br>
+      <div><i style="background: #e41a1c"></i> Debris Avalanche</div>
+      <div><i style="background: #ff7f00"></i> Earthflow</div>
+      <div><i style="background: #4daf4a"></i> Gully Erosion</div>
+      <div><i style="background: #984ea3"></i> Rill & Gully Erosion</div>
+      <div><i style="background: #a65628"></i> Scalding</div>
+      <div><i style="background: #f781bf"></i> Sheet & Rill Erosion</div>
+      <div><i style="background: #999999"></i> Sheet Erosion</div>
+      <div><i style="background: #377eb8"></i> Stable Earthflow</div>
+      <div><i style="background: #66c2a5"></i> Wind Erosion</div>
+      <div><i style="background: #ffff33"></i> Other</div>
+     <div style= "color: brown;"
+      Sediment movement is linked to coastal erosion. <br> 
+      We speculate that land erosion near the coast  <br>
+      may affect sediment supply to the coast.<div>
+
+    `,
+    "Coastal Soil": `
+      <strong>Coastal Soil</strong><br>
+      <div><i style="background: #b2df8a"></i> Alluvial/Recent</div>
+      <div><i style="background: #984ea3"></i> Organic</div>
+      <div><i style="background: #ffae42"></i> Bedrock</div>
+      <div><i style="background: #ffff66"></i> Volcanic</div>
+      <div><i style="background: #666666"></i> Urban/Non-Soil</div>
+      <div><i style="background: #b22222"></i> Rock/Volcanic</div>
+      <div><i style="background: #cccccc"></i> Other</div>
+     <div style= "color: brown;"
+     Different soils have different resistance to erosion.<br>
+     For example, alluvial soils are soft and easily eroded,<br>
+     whereas bedrock areas are naturally more resistant.<div>
+
+    `,
+    "Coastal Soil Drainage Class": `
+      <strong>Soil Drainage</strong><br>
+      <div><i style="background: #d73027"></i> Very Poor</div>
+      <div><i style="background: #fdae61"></i> Poor</div>
+      <div><i style="background: #ffffbf"></i> Moderate</div>
+      <div><i style="background: #91cf60"></i> Well Drained</div>
+      <div><i style="background: #1a9850"></i> Very Well Drained</div>
+      <div><i style="background: #cccccc"></i> Other</div>
+      
+      Certain hydrosystems are naturally more dynamic or erosion-prone <div> 
+
+    `,
+    "Coastal Hydrosystems": `
+      <strong>Hydrosystem Type</strong><br>
+      <div><i style="background: #e41a1c"></i> Tidal Lagoon</div>
+      <div><i style="background: #fdae61"></i> Waituna-Type Lagoon</div>
+      <div><i style="background: #a6cee3"></i> Beach Stream</div>
+      <div><i style="background: #1f78b4"></i> Shallow Drowned Valley</div>
+      <div><i style="background: #984ea3"></i> Hapua-Type Lagoon</div>
+      <div><i style="background: #66c2a5"></i> Freshwater River Mouth</div>
+      <div><i style="background: #238b45"></i> Tidal River Mouth</div>
+      <div><i style="background: #cccccc"></i> Other</div>
+    `,
+    "Coastal & Estuarine Suspended Solids (2016-2020)": `
+      <strong>Suspended Solids (mg/l)</strong><br>
+      <div><i style="background: #ffffff"></i> 1.7 to 8.6</div>
+      <div><i style="background: #ffbfbf"></i> 8.6 to 17</div>
+      <div><i style="background: #ff8080"></i> 17 to 30</div>
+      <div><i style="background: #ff4040"></i> 30 to 49.5</div>
+      <div><i style="background: #ff0000"></i> 49.5 to 96</div>
+    
+     High suspended sediment concentrations are associated <br>
+     with estuarine and coastal sedimentation. <div>
+
+    `,
+   "Cyclone Gabrielle": `
+  <strong>Cyclone Gabrielle</strong><br>
+  <div style="display: flex; align-items: center;">
+    <img src="./Cyclone_images/twister.png" style="width: 20px; height: 20px; margin-right: 8px;">
+    Erosion Site
+  </div>
+ <div style= "color: red;"
+ Storms can cause significant coastal erosion.<br>
+ Click on each symbol to see how much each beach <br>
+ eroded due to Cyclone Gabrielle.<div>
+
+
+`,
+"Coastal Sensitivity: Erosion": `
+  <strong>Coastal Sensitivity: Erosion</strong><br>
+  <div><i style="background: #1a9641"></i> 183 - 264</div>
+  <div><i style="background: #a6d96a"></i> 264 - 293</div>
+  <div><i style="background: #ffffbf"></i> 293 - 317</div>
+  <div><i style="background: #fdae61"></i> 317 - 342</div>
+  <div><i style="background: #d7191c"></i> 342 - 395</div>
+  <div style= "color:red;"
+  This shows the potential future impact of climate change <br>
+  on the soft shore coastline’s sensitivity to coastal erosion<br>
+  and accretion. A higher number means more sensitive.<div>
+
+`,
+
+"Coastal Sensitivity: Inundation": `
+  <strong>Coastal Sensitivity: Inundation</strong><br>
+  <div><i style="background: #1a9641"></i> 211 - 275</div>
+  <div><i style="background: #a6d96a"></i> 275 - 313</div>
+  <div><i style="background: #ffffbf"></i> 313 - 349</div>
+  <div><i style="background: #fdae61"></i> 349 - 391</div>
+  <div><i style="background: #d7191c"></i> 391 - 467</div>
+  <div style= "color:red;"
+  This shows the potential future impact of climate change<br>
+  on the soft shore coastline’s sensitivity to flooding.<br>
+  A higher number means more sensitive.<div>
+
+`,
+
+"Sea Level Rise": `
+  <strong>Sea Level Rise</strong><br>
+  <div><i style="background: #fbf74c"></i> 0cm</div>
+  <div><i style="background: #fcef7c"></i> 20cm</div>
+  <div><i style="background: #fde6ad"></i> 40cm</div>
+  <div><i style="background: #fee2c5"></i> 50cm</div>
+  <div><i style="background: #fca487"></i> 80cm</div>
+  <div><i style="background: #fb7454"></i> 100cm</div>
+  <div><i style="background: #ef3b2c"></i> 130cm</div>
+  <div><i style="background: #c5161c"></i> 160cm</div>
+  <div><i style="background: #a50f15"></i> 180cm</div>
+  <div><i style="background: #67000d"></i> 200cm</div>
+`
+
+
+
+  };
+  return legends[layerName] || '';
+}
+
+map.on("overlayadd", function(e) {
+  legendControl.getContainer().innerHTML = getLegendHTML(e.name);
+ 
+  if (e.name === "Sea Level Rise") {
+    document.getElementById('seaLevelSlider').style.display = 'block';
+  }
+});
+map.on("overlayremove", function(e) {
+  const shown = Object.entries(overlays).filter(([name, layer]) => map.hasLayer(layer));
+  legendControl.getContainer().innerHTML = shown.length === 0 ? getLegendHTML("Coastal Change Rate") : getLegendHTML(shown[shown.length - 1][0]);
+  
+  if (e.name === "Sea Level Rise") {
+    document.getElementById('seaLevelSlider').style.display = 'none';
+  }
+});
+
+function updateSeaLevel(value) {
+  currentSeaLevel = value;
+  document.getElementById('sliderValue').textContent = value + 'cm';
+  
+   if (map.hasLayer(seaLevelRiseLayer)) {
+    map.removeLayer(seaLevelRiseLayer);
+    seaLevelRiseLayer = createSeaLevelLayer(value);
+    map.addLayer(seaLevelRiseLayer);
+    overlays["Sea Level Rise"] = seaLevelRiseLayer;
+  }
+}
+
+function searchLocation() {
+  var query = document.getElementById('locationInput').value;
+  fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${query}`)
+    .then(response => response.json())
+    .then(data => {
+      if (data && data.length > 0) {
+        map.setView([data[0].lat, data[0].lon], 10);
+      } else {
+        alert("Location not found");
+      }
+    });
+}
+</script>
+</body>
+</html>
